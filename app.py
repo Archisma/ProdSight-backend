@@ -1,8 +1,6 @@
 import os
 import re
 import json
-import time
-import glob
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
@@ -13,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Aurora RAG stack (optional but kept, as you asked to keep old code style)
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -22,7 +21,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
-# CrewAI + Tavily
+# CrewAI + Tavily (optional / public search)
 from crewai import Agent, Task, Crew
 from crewai.tools import BaseTool
 from tavily import TavilyClient
@@ -31,28 +30,33 @@ from tavily import TavilyClient
 # =============================================================================
 # CONFIG
 # =============================================================================
-# Aurora demo data folder (kept as-is)
-AURORA_DATA_DIR = "data"
-
-PDF_PATH  = os.path.join(AURORA_DATA_DIR, "aurora_systems_full_policy_manual.pdf")
-DOCX_PATH = os.path.join(AURORA_DATA_DIR, "aurora_systems_long_term_strategy.docx")
-XLSX_PATH = os.path.join(AURORA_DATA_DIR, "aurora_systems_operational_financials.xlsx")
-
-# ProdSight evidence files (same folder as app.py)
 APP_DIR = Path(__file__).resolve().parent
+
+# Evidence data files
 INCIDENTS_FILE = APP_DIR / "incidents.json"
 MAILBOX_FILE   = APP_DIR / "mailbox.json"
 
-# Optional server logs mount
-LOG_ROOT = Path(os.environ.get("LOG_ROOT", str(APP_DIR / "server_logs")))
+# 3 log roots (host locally; in prod you can point these to mounted paths)
+JAVA_LOG_ROOT     = Path(os.environ.get("LOG_ROOT_JAVA", str(APP_DIR / "logs" / "java")))
+AUTOSYS_LOG_ROOT  = Path(os.environ.get("LOG_ROOT_AUTOSYS", str(APP_DIR / "logs" / "autosys")))
+ABINITIO_LOG_ROOT = Path(os.environ.get("LOG_ROOT_ABINITIO", str(APP_DIR / "logs" / "autosys" / "abinitio")))
 
-# Similarity thresholds (tune later)
+# Similarity thresholds
 INC_MIN_SCORE  = float(os.environ.get("INC_MIN_SCORE", "0.62"))
 MAIL_MIN_SCORE = float(os.environ.get("MAIL_MIN_SCORE", "0.58"))
 
-# Render env vars
+# LLM + Search keys (Render env vars)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+
+# Demo remote simulation settings
+DEMO_REMOTE = os.environ.get("DEMO_REMOTE", "true").lower() == "true"
+BASTION_HOST = os.environ.get("BASTION_HOST", "bastion.prod.local")
+JAVA_HOST    = os.environ.get("JAVA_HOST", "java-prod-01")
+AUTOSYS_HOST = os.environ.get("AUTOSYS_HOST", "autosys-prod-01")
+
+MID_SERVER   = os.environ.get("MID_SERVER", "mid-prod-01")
+SNOW_INSTANCE = os.environ.get("SNOW_INSTANCE", "instance.service-now.com")
 
 if not GEMINI_API_KEY:
     print("❌ Missing GEMINI_API_KEY (or GOOGLE_API_KEY). Set it in Render Environment Variables.")
@@ -61,11 +65,11 @@ if not GEMINI_API_KEY:
 # =============================================================================
 # FASTAPI APP
 # =============================================================================
-app = FastAPI(title="ProdSight Backend", version="2.0")
+app = FastAPI(title="ProdSight Backend", version="2.1")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # later restrict to your Cloudflare Pages domain
+    allow_origins=["*"],  # tighten later to your Cloudflare Pages domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,7 +77,7 @@ app.add_middleware(
 
 
 # =============================================================================
-# REQUEST MODELS
+# REQUEST / RESPONSE MODELS
 # =============================================================================
 class SearchReq(BaseModel):
     query: str
@@ -84,10 +88,6 @@ class PublicSearchReq(BaseModel):
 class AnalyzeReq(BaseModel):
     error_text: str
 
-
-# =============================================================================
-# ProdSight Response Models
-# =============================================================================
 class BlockSummary(BaseModel):
     found: bool
     title: str
@@ -98,63 +98,45 @@ class AnalyzeResp(BaseModel):
     servicenow: BlockSummary
     mail: BlockSummary
     server_logs: BlockSummary
-    fallback: BlockSummary
     prodsight_answer: str
     details: Dict[str, Any]
 
 
 # =============================================================================
-# 1) LOAD DOCUMENTS (Aurora RAG) - kept for your existing demo
+# LLM (Gemini)
 # =============================================================================
+llm = ChatGoogleGenerativeAI(
+    model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+    temperature=0,
+    google_api_key=GEMINI_API_KEY
+)
+
+
+# =============================================================================
+# OPTIONAL: Aurora RAG endpoints (kept from old project)
+# You can remove this entire section if not required for ProdSight.
+# =============================================================================
+AURORA_DATA_DIR = "data"
+PDF_PATH  = os.path.join(AURORA_DATA_DIR, "aurora_systems_full_policy_manual.pdf")
+DOCX_PATH = os.path.join(AURORA_DATA_DIR, "aurora_systems_long_term_strategy.docx")
+XLSX_PATH = os.path.join(AURORA_DATA_DIR, "aurora_systems_operational_financials.xlsx")
+
 docs: List[Document] = []
 
-# PDF
 if os.path.exists(PDF_PATH):
-    pdf_docs = PyPDFLoader(PDF_PATH).load()
-    docs += pdf_docs
-    print(f"✅ PDF loaded successfully: {os.path.basename(PDF_PATH)} (pages={len(pdf_docs)})")
-else:
-    print(f"⚠️ PDF not found: {PDF_PATH}")
-
-# DOCX
+    docs += PyPDFLoader(PDF_PATH).load()
 if os.path.exists(DOCX_PATH):
-    docx_docs = Docx2txtLoader(DOCX_PATH).load()
-    docs += docx_docs
-    print(f"✅ Word loaded successfully: {os.path.basename(DOCX_PATH)} (sections={len(docx_docs)})")
-else:
-    print(f"⚠️ Word not found: {DOCX_PATH}")
-
-# XLSX
+    docs += Docx2txtLoader(DOCX_PATH).load()
 if os.path.exists(XLSX_PATH):
     xls = pd.ExcelFile(XLSX_PATH)
-    sheet_count = 0
     for sheet in xls.sheet_names:
         df = pd.read_excel(XLSX_PATH, sheet_name=sheet)
         text = f"Excel Sheet: {sheet}\n\n" + df.to_string(index=False)
         docs.append(Document(page_content=text, metadata={"source": XLSX_PATH, "sheet": sheet}))
-        sheet_count += 1
-    print(f"✅ Excel loaded successfully: {os.path.basename(XLSX_PATH)} (sheets={sheet_count})")
-else:
-    print(f"⚠️ Excel not found: {XLSX_PATH}")
 
-print(f"📄 Aurora RAG docs loaded: {len(docs)} total")
-
-
-# =============================================================================
-# 2) SPLIT / CHUNK (Aurora)
-# =============================================================================
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 split_documents = text_splitter.split_documents(docs) if docs else []
-print(f"✅ Chunking completed: {len(split_documents)} chunks")
 
-
-# =============================================================================
-# 3) EMBEDDINGS + VECTORSTORE + RAG CHAIN (Aurora)
-# =============================================================================
-# NOTE: If you deploy without Aurora docs, the /search endpoint will still run,
-# but it will respond "I don't know" because there is no context.
-embeddings = None
-vectorstore = None
 retriever = None
 rag_chain = None
 
@@ -165,12 +147,6 @@ if GEMINI_API_KEY and split_documents:
     )
     vectorstore = FAISS.from_documents(documents=split_documents, embedding=embeddings)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-
-llm = ChatGoogleGenerativeAI(
-    model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-    temperature=0,
-    google_api_key=GEMINI_API_KEY
-)
 
 prompt = ChatPromptTemplate.from_template("""
 You are a helpful assistant.
@@ -191,11 +167,9 @@ if retriever:
         | llm
     )
 
-print("✅ Gemini LLM ready")
-
 
 # =============================================================================
-# CrewAI + Tavily Tool (Public Search) - kept
+# OPTIONAL: Tavily public search (kept from old code)
 # =============================================================================
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
@@ -235,19 +209,16 @@ def run_crewai_public(topic: str) -> str:
         tools=[tavily_tool],
         verbose=False
     )
-
     task = Task(
         description=f"Research this topic and provide a short answer with sources:\n{topic}",
         agent=researcher
     )
-
     crew = Crew(agents=[researcher], tasks=[task], verbose=False)
-    result = crew.kickoff()
-    return str(result)
+    return str(crew.kickoff())
 
 
 # =============================================================================
-# ProdSight helpers (ServiceNow + Mail + Server Logs)
+# Helper: JSON load
 # =============================================================================
 def _safe_load_json(path: Path, default: Any):
     try:
@@ -260,6 +231,10 @@ def _safe_load_json(path: Path, default: Any):
     except Exception:
         return default
 
+
+# =============================================================================
+# Helper: similarity
+# =============================================================================
 def _norm(s: str) -> str:
     s = (s or "").lower().strip()
     s = re.sub(r"\s+", " ", s)
@@ -271,31 +246,10 @@ def _sim(a: str, b: str) -> float:
         return 0.0
     return SequenceMatcher(None, a2, b2).ratio()
 
-def extract_log_path(text: str) -> Optional[str]:
-    if not text:
-        return None
-    m = re.search(r"LogPath:\s*([^\s]+)", text, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    m2 = re.search(r"(/var/log/[A-Za-z0-9_\-./]+)", text)
-    if m2:
-        return m2.group(1).strip()
-    return None
 
-def read_log_excerpt(log_path: str, max_lines: int = 80) -> Tuple[bool, Optional[str]]:
-    if not log_path:
-        return False, None
-    rel = log_path.lstrip("/")
-    candidate = LOG_ROOT / rel
-    if not candidate.exists() or not candidate.is_file():
-        return False, None
-    try:
-        lines = candidate.read_text(encoding="utf-8", errors="ignore").splitlines()
-        tail = lines[-max_lines:] if len(lines) > max_lines else lines
-        return True, "\n".join(tail)
-    except Exception:
-        return True, None
-
+# =============================================================================
+# ServiceNow matching (from incidents.json)
+# =============================================================================
 def match_servicenow(error_text: str) -> Tuple[Optional[Dict[str, Any]], float]:
     incidents = _safe_load_json(INCIDENTS_FILE, default=[])
     if not isinstance(incidents, list):
@@ -314,6 +268,10 @@ def match_servicenow(error_text: str) -> Tuple[Optional[Dict[str, Any]], float]:
         return best, best_score
     return None, best_score
 
+
+# =============================================================================
+# Mail matching (from mailbox.json)
+# =============================================================================
 def load_mail_messages() -> List[Dict[str, Any]]:
     mb = _safe_load_json(MAILBOX_FILE, default={})
     folders = (mb or {}).get("folders", {})
@@ -370,33 +328,107 @@ def match_mail(error_text: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict
 
     return alert, resolution, best_score
 
-def internet_fallback(error_text: str) -> Tuple[str, List[Dict[str, str]]]:
-    if not tavily_client:
-        return "", []
-    q = f"Troubleshoot this production error and suggest resolution steps:\n\n{error_text}"
-    result = tavily_client.search(
-        query=q,
-        max_results=5,
-        include_answer=True,
-        include_sources=True
-    )
-    answer = (result.get("answer") or "").strip()
-    sources = [{"title": (r.get("title") or "source").strip(), "url": (r.get("url") or "").strip()}
-               for r in (result.get("results") or [])]
-    return answer, sources
 
-def generic_fallback(error_text: str) -> str:
-    first_line = (error_text.strip().splitlines()[:1] or [""])[0]
-    return (
-        "No internal evidence found in ServiceNow, Mail, or Server Logs.\n\n"
-        "Suggested L3 triage (generic):\n"
-        "1) Identify the failing component/service and the first exception line.\n"
-        "2) Check recent deployments/config changes for that service.\n"
-        "3) Correlate time window in logs/metrics (latency, errors, retries, GC, DB locks).\n"
-        "4) Validate upstream dependencies (network, DNS, TLS, DB, API timeouts).\n"
-        "5) If data-related: validate schema changes, nulls, duplicates, idempotency keys.\n\n"
-        f"Observed error line: {first_line}\n"
-    )
+# =============================================================================
+# Server log search: portable grep across 3 roots
+# =============================================================================
+def grep_in_logs(
+    root: Path,
+    query: str,
+    max_files: int = 120,
+    max_matches: int = 30,
+    max_line_len: int = 300
+) -> Dict[str, Any]:
+    out = {
+        "root": str(root),
+        "found": False,
+        "matches": []
+    }
+
+    if not root.exists() or not root.is_dir():
+        out["error"] = "log_root_missing"
+        return out
+
+    q = (query or "").strip()
+    if not q:
+        out["error"] = "empty_query"
+        return out
+
+    q_low = q.lower()
+    scanned = 0
+    matched = 0
+
+    patterns = ["*.log", "*.out", "*.txt"]
+    files: List[Path] = []
+    for p in patterns:
+        files.extend(root.rglob(p))
+
+    files = sorted(files)[:max_files]
+
+    for fp in files:
+        try:
+            scanned += 1
+            with fp.open("r", encoding="utf-8", errors="ignore") as f:
+                for i, line in enumerate(f, start=1):
+                    if q_low in line.lower():
+                        out["found"] = True
+                        matched += 1
+                        out["matches"].append({
+                            "file": str(fp),
+                            "line_no": i,
+                            "line": (line.strip()[:max_line_len] + ("…" if len(line.strip()) > max_line_len else ""))
+                        })
+                        if matched >= max_matches:
+                            out["truncated"] = True
+                            out["scanned_files"] = scanned
+                            out["match_count"] = matched
+                            return out
+        except Exception:
+            continue
+
+    out["scanned_files"] = scanned
+    out["match_count"] = matched
+    return out
+
+
+# =============================================================================
+# Demo meta: SSH via bastion + MID server
+# =============================================================================
+def build_remote_meta(error_text: str) -> dict:
+    # Short signature for demo grep command readability
+    sig = (error_text.strip().splitlines()[0] if error_text else "error_signature")[:120]
+    sig = sig.replace('"', '\\"')
+
+    return {
+        "server_logs_meta": {
+            "mode": "ssh_via_bastion" if DEMO_REMOTE else "local",
+            "bastion": BASTION_HOST,
+            "targets": [
+                {"name": JAVA_HOST, "type": "java", "path_hint": "/var/log/java"},
+                {"name": AUTOSYS_HOST, "type": "autosys", "path_hint": "/var/log/autosys"},
+                {"name": AUTOSYS_HOST, "type": "abinitio", "path_hint": "/var/log/abinitio"},
+            ],
+            "demo_commands": [
+                f"ssh prodsight@{BASTION_HOST}",
+                f"ssh {JAVA_HOST}   # JAVA",
+                f'grep -R "{sig}" /var/log/java',
+                f"ssh {AUTOSYS_HOST} # AUTOSYS + ABINITIO",
+                f'grep -R "{sig}" /var/log/autosys',
+                f'grep -R "{sig}" /var/log/abinitio',
+            ]
+        },
+        "servicenow_meta": {
+            "mode": "mid_server_integration",
+            "instance": SNOW_INSTANCE,
+            "mid_server": MID_SERVER,
+            "demo_flow": [
+                f"ProdSight -> MID Server ({MID_SERVER})",
+                f"MID Server -> ServiceNow ({SNOW_INSTANCE})",
+                "Query: recent INCs + similar error signatures",
+                "Return: INC list + previous error + resolution steps"
+            ]
+        }
+    }
 
 
 # =============================================================================
@@ -408,13 +440,18 @@ def health():
         "ok": True,
         "service": "ProdSight – Production Intelligence for Faster Resolution",
         "proprietary": "TCS",
+        "gemini_model": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
         "incidents_file_exists": INCIDENTS_FILE.exists(),
         "mailbox_file_exists": MAILBOX_FILE.exists(),
-        "log_root": str(LOG_ROOT),
-        "tavily_configured": bool(tavily_client),
-        "gemini_model": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+        "log_roots": {
+            "java": str(JAVA_LOG_ROOT),
+            "autosys": str(AUTOSYS_LOG_ROOT),
+            "abinitio": str(ABINITIO_LOG_ROOT),
+        },
+        "demo_remote": DEMO_REMOTE,
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
+
 
 @app.post("/search")
 def search(req: SearchReq):
@@ -423,11 +460,13 @@ def search(req: SearchReq):
     out = rag_chain.invoke(req.query)
     return {"answer": getattr(out, "content", str(out))}
 
+
 @app.post("/public_search")
 def public_search(req: PublicSearchReq):
     if not TAVILY_API_KEY:
         return {"answer": "Tavily not configured (missing TAVILY_API_KEY)."}
     return {"answer": run_crewai_public(req.topic)}
+
 
 @app.post("/analyze", response_model=AnalyzeResp)
 def analyze(req: AnalyzeReq):
@@ -438,81 +477,53 @@ def analyze(req: AnalyzeReq):
     # --- ServiceNow ---
     inc, inc_score = match_servicenow(error_text)
     sn_found = inc is not None
-    sn_summary = "Not found in ServiceNow."
-    if sn_found:
-        root_cause = (inc.get("root_cause") or "")
-        sn_summary = f"Match {inc.get('incident_id','(no-id)')}: {root_cause[:160]}"
+
+    # Summary should be one-liner count in UI; backend can still provide a summary string
+    sn_summary = "Total matching incidents: 1" if sn_found else "Total matching incidents: 0"
 
     # --- Mail ---
     alert_msg, res_msg, mail_score = match_mail(error_text)
     mail_found = bool(alert_msg or res_msg)
-    mail_summary = "Not found in Mail."
-    if mail_found:
-        chosen = res_msg or alert_msg or {}
-        preview = ""
-        body = (res_msg or {}).get("body") or ""
-        if body:
-            m = re.search(r"(Root cause:.*|Fix:.*|Recovery:.*)", body, flags=re.IGNORECASE)
-            preview = (m.group(1).strip() if m else body.strip().splitlines()[0])
-        else:
-            preview = ((alert_msg or {}).get("body") or "").strip().splitlines()[0] if alert_msg else ""
-        mail_summary = f"Match {chosen.get('thread_id','(no-thread)')}: {preview[:160]}"
+    mail_summary = "Total matching threads: 1" if mail_found else "Total matching threads: 0"
 
-    # --- Server Logs ---
-    log_path = None
-    if alert_msg:
-        log_path = extract_log_path(alert_msg.get("body", ""))
-    if not log_path:
-        log_path = extract_log_path(error_text)
+    # --- Server Logs (3 roots) ---
+    java_hit = grep_in_logs(JAVA_LOG_ROOT, error_text)
+    autosys_hit = grep_in_logs(AUTOSYS_LOG_ROOT, error_text)
+    abinitio_hit = grep_in_logs(ABINITIO_LOG_ROOT, error_text)
 
-    log_found = bool(log_path)
-    log_exists, excerpt = (False, None)
-    if log_found:
-        log_exists, excerpt = read_log_excerpt(log_path)
+    any_found = bool(java_hit.get("found") or autosys_hit.get("found") or abinitio_hit.get("found"))
 
-    logs_summary = "Not found in Server Logs."
-    if log_found:
-        logs_summary = f"Log referenced: {log_path} (file not mounted)"
-        if log_exists:
-            logs_summary = f"Log available: {log_path} (excerpt ready)"
+    if any_found:
+        parts = []
+        if java_hit.get("found"):
+            parts.append(f"JAVA({len(java_hit.get('matches', []))} hits)")
+        if autosys_hit.get("found"):
+            parts.append(f"AUTOSYS({len(autosys_hit.get('matches', []))} hits)")
+        if abinitio_hit.get("found"):
+            parts.append(f"ABINITIO({len(abinitio_hit.get('matches', []))} hits)")
+        logs_summary = "Matches found: " + ", ".join(parts)
+        logs_conf = 0.80
+    else:
+        logs_summary = "No matching error found in JAVA/AUTOSYS/ABINITIO logs."
+        logs_conf = 0.0
 
-    # --- Fallback only if all missing ---
-    fallback_used = (not sn_found) and (not mail_found) and (not log_found)
-    fb_summary = "Not used."
-    fb_found = False
-    fb_conf = 0.0
-
-    fb_details: Dict[str, Any] = {"used": False, "mode": "none", "answer": "", "sources": []}
-    if fallback_used:
-        if tavily_client:
-            ans, sources = internet_fallback(error_text)
-            if ans:
-                fb_found = True
-                fb_conf = 0.50
-                fb_summary = ans[:220] + ("..." if len(ans) > 220 else "")
-                fb_details = {"used": True, "mode": "internet", "answer": ans, "sources": sources}
-            else:
-                gen = generic_fallback(error_text)
-                fb_found = True
-                fb_conf = 0.40
-                fb_summary = gen[:220] + "..."
-                fb_details = {"used": True, "mode": "generic", "answer": gen, "sources": []}
-        else:
-            gen = generic_fallback(error_text)
-            fb_found = True
-            fb_conf = 0.40
-            fb_summary = gen[:220] + "..."
-            fb_details = {"used": True, "mode": "generic", "answer": gen, "sources": []}
-
-    # --- Evidence bundle for Details tab ---
-    evidence = {
+    # --- Build evidence bundle for Details tab ---
+    evidence: Dict[str, Any] = {
         "servicenow": inc or {},
         "mail": {"alert": alert_msg or {}, "resolution": res_msg or {}},
-        "server_logs": {"log_path": log_path, "file_exists": bool(log_exists), "excerpt": excerpt or ""},
-        "fallback": fb_details,
+        "server_logs": {
+            "java": java_hit,
+            "autosys": autosys_hit,
+            "abinitio": abinitio_hit,
+        }
     }
 
-    # --- Gemini: produce final answer from evidence (no hallucinations) ---
+    # Add demo “remote session” metadata
+    meta = build_remote_meta(error_text)
+    evidence["server_logs_meta"] = meta["server_logs_meta"]
+    evidence["servicenow_meta"] = meta["servicenow_meta"]
+
+    # --- Gemini: write final answer (evidence-first, no hallucinations) ---
     prodsight_prompt = f"""
 You are ProdSight – Production Intelligence for Faster Resolution.
 Proprietary solution by TCS (client showcase).
@@ -530,7 +541,6 @@ Produce:
    - ServiceNow: Found/Not Found
    - Mail: Found/Not Found
    - Server Logs: Found/Not Found
-   - Fallback: Used/Not Used
 
 INPUT ERROR:
 {error_text}
@@ -540,7 +550,6 @@ EVIDENCE (JSON):
 """.strip()
 
     try:
-        # Uses your existing LangChain Gemini LLM instance
         prodsight_answer = llm.invoke(prodsight_prompt).content
     except Exception as e:
         prodsight_answer = f"(LLM unavailable) Evidence summary only. Error: {str(e)}"
@@ -548,8 +557,7 @@ EVIDENCE (JSON):
     return AnalyzeResp(
         servicenow=BlockSummary(found=sn_found, title="ServiceNow", summary=sn_summary, confidence=round(float(inc_score), 3)),
         mail=BlockSummary(found=mail_found, title="Mail", summary=mail_summary, confidence=round(float(mail_score), 3)),
-        server_logs=BlockSummary(found=log_found, title="Server Logs", summary=logs_summary, confidence=0.70 if log_found else 0.0),
-        fallback=BlockSummary(found=fb_found, title="Fallback", summary=fb_summary, confidence=fb_conf),
+        server_logs=BlockSummary(found=any_found, title="Server Logs", summary=logs_summary, confidence=logs_conf),
         prodsight_answer=prodsight_answer,
         details=evidence
     )
