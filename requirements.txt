@@ -1,0 +1,10 @@
+# Core API framework
+fastapi
+uvicorn
+
+# Validation / request models
+pydantic>=2.10,<3
+
+# Optional: Internet / open-source fallback
+# Enabled only if TAVILY_API_KEY is set
+tavily-python
