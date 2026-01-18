@@ -1,0 +1,5 @@
+2026-01-16 09:58:12 INFO  [Bootstrap] Starting Billing Application
+2026-01-16 10:01:45 INFO  [InvoiceService] Processing invoice INV1001
+2026-01-16 10:01:46 ERROR [InvoiceService] java.lang.NullPointerException
+2026-01-16 10:01:46 ERROR [InvoiceService] at com.company.billing.InvoiceService.processInvoice(InvoiceService.java:214)
+2026-01-16 10:01:47 WARN  [TxManager] Transaction rollback initiated

@@ -1,0 +1,2 @@
+2026-01-16 10:08:55 INFO  [HealthCheck] JVM memory usage normal
+2026-01-16 10:08:56 INFO  [HealthCheck] Thread count normal

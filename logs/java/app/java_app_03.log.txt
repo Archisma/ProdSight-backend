@@ -1,0 +1,3 @@
+2026-01-16 10:03:11 INFO  [AuthFilter] User login attempt user=svc_batch
+2026-01-16 10:03:12 ERROR [AuthFilter] AuthenticationFailedException
+2026-01-16 10:03:12 WARN  [Security] Invalid credentials for svc_batch

@@ -1,0 +1,4 @@
+2026-01-16 10:02:01 INFO  [OrderService] Order received ORD88921
+2026-01-16 10:02:02 DEBUG [DBPool] Acquiring DB connection
+2026-01-16 10:02:04 ERROR [OrderService] SQLIntegrityConstraintViolationException
+2026-01-16 10:02:04 ERROR [OrderService] Duplicate key value violates constraint

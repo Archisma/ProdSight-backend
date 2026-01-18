@@ -1,0 +1,2 @@
+2026-01-16 10:10:12 INFO  [ShutdownHook] Application shutdown initiated
+2026-01-16 10:10:13 INFO  [ShutdownHook] Cleanup completed

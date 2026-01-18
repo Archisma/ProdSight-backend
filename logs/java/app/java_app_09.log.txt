@@ -1,0 +1,2 @@
+2026-01-16 10:09:40 INFO  [FileUploader] Upload started file=batch_01.csv
+2026-01-16 10:09:41 ERROR [FileUploader] IOException: Disk quota exceeded

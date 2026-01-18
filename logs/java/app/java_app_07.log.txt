@@ -1,0 +1,2 @@
+2026-01-16 10:07:18 INFO  [InvoiceService] Processing invoice INV1045
+2026-01-16 10:07:19 INFO  [InvoiceService] Invoice processed successfully

@@ -1,0 +1,2 @@
+2026-01-16 10:05:00 INFO  [Scheduler] Daily reconciliation job started
+2026-01-16 10:05:45 ERROR [Scheduler] JobExecutionException: Job failed

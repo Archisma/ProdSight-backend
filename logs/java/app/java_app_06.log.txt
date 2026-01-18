@@ -1,0 +1,2 @@
+2026-01-16 10:06:30 INFO  [CacheManager] Cache refresh initiated
+2026-01-16 10:06:31 ERROR [CacheManager] CacheLoadException for key CUSTOMER_MAP
