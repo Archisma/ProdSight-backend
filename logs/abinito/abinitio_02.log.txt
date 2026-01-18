@@ -1,0 +1,3 @@
+2026-01-16 10:02:30 INFO  Graph CUSTOMER_LOAD started
+2026-01-16 10:03:15 WARN  Records rejected: 56
+
